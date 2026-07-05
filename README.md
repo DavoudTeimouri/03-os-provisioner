@@ -1,51 +1,168 @@
-# 03‑os‑provisioner
+# StratoShell Module 03 – OS Provisioner
 
-Multi‑distribution Ansible Playbook generator for automated OS baseline provisioning (Ubuntu / RHEL).
+Multi-distro Ansible Playbook generator for automated OS baseline provisioning (Ubuntu/RHEL). Supports NTP pools, DNS customization, security hardening, and remote GitLab sync.
 
-## Disclaimer
-This module **generates** Ansible playbooks; it does not execute them directly. Run the generated playbook against your inventory.
+## Architecture
 
-## Supported Distributions
-| Family | Versions |
-|--------|----------|
-| Ubuntu | 22.04, 24.04, 26.04 |
-| RHEL‑based | 8.x, 9.x, 10.x |
+### Supported Distributions
+| Distribution | Versions |
+|--------------|----------|
+| Ubuntu (Debian-based) | 22.04 LTS, 24.04 LTS, 26.04 |
+| RHEL-based | 8.x, 9.x, 10.x |
 
-## Generated Playbook Tasks
-1. **Chrony NTP** – installs and configures `chronyd` with the requested time zone.
-2. **Service Hardening** – masks/disables non‑essential services: `postfix`, `bluetooth`, `cups`, `avahi-daemon`.
-3. **Firewall** – disables `ufw` (Ubuntu) or `firewalld` (RHEL).
-4. **SELinux** – sets to `disabled` (persistent) and `permissive` (runtime) on RHEL.
-5. **DNS** – writes persistent `/etc/resolv.conf` with user‑provided primary/secondary DNS; configures NetworkManager on RHEL 8+.
-6. **System Limits** – raises `nofile` to 65536 in `/etc/security/limits.conf`, `/etc/systemd/system.conf`, and `/etc/systemd/user.conf`.
+### Core Components
+- **`execute.sh`** – Interactive engine that collects parameters and generates:
+  - `site.yml` – Ansible playbook with all provisioning tasks
+  - `inventory.ini` – Inventory with host groups and global variables
+  - `templates/chrony.conf.j2` – Jinja2 template for Chrony NTP configuration
+  - `templates/resolv.conf.j2` – Jinja2 template for DNS resolver configuration
 
-## Usage
-```bash
-cd modules/03-os-provisioner
-./execute.sh
-```
-Follow the interactive prompts:
-1. Target Time Zone (e.g., `Asia/Tehran`).
-2. Primary & Secondary DNS IPs (validated).
-3. Custom SSH port for Ansible.
-4. Delivery method:
-   - **A) Local** – saves `site.yml`, `inventory.ini`, and Jinja2 templates to a directory you specify.
-   - **B) GitLab** – (placeholder) stages files for GitLab API upload.
+### Provisioning Tasks
+1. **Time & NTP Synchronization**
+   - Install `chrony` (apt/dnf per distro)
+   - Configure custom NTP server pool via `chrony.conf.j2`
+   - Apply target timezone system-wide
+2. **Service Hardening**
+   - Disable & mask: `postfix`, `bluetooth`, `cups`, `avahi-daemon`
+3. **Firewall Removal**
+   - Disable `ufw` (Debian/Ubuntu)
+   - Disable & mask `firewalld` (RHEL)
+4. **SELinux (RHEL only)**
+   - Runtime: `setenforce 0`
+   - Persistent: `SELINUX=disabled` in `/etc/selinux/config`
+5. **DNS Persistence**
+   - Write `/etc/resolv.conf` via template
+   - Configure NetworkManager DNS on RHEL 8+
+6. **Resource Limits**
+   - `nofile` hard/soft limits → `65536` in `/etc/security/limits.conf`
 
-## Running the Generated Playbook
-After local delivery:
-```bash
-cd <output-directory>
-ansible-playbook -i inventory.ini site.yml
-```
-
-## Requirements
-- Ansible ≥ 2.12 on the control machine.
-- Python 3 on target hosts.
-- SSH access to targets (root or sudo user).
-
-## Cleanup
-Ctrl+C at any prompt triggers safe cleanup of temporary files.
+### NTP Synchronization Rules
+- Input: comma- or space-separated list (e.g., `0.pool.ntp.org, 1.pool.ntp.org`)
+- Parsed into array and injected into Jinja2 template
+- Fallback to standard pools if input empty
+- Chrony configured with `iburst`, `makestep`, hardware timestamping
 
 ---
-© Davoud Teimouri – StratoShell project
+
+## Execution via Local Filesystem
+
+```bash
+# 1. Run the generator
+./execute.sh
+
+# 2. Choose Option A (local), provide output directory
+#    Example: /home/user/os-provisioner
+
+# 3. Execute the generated playbook
+cd /home/user/os-provisioner
+ansible-playbook -i inventory.ini site.yml --ask-become-pass
+# or with -K flag
+ansible-playbook -i inventory.ini site.yml -K
+```
+
+### Prerequisites
+- Ansible ≥ 2.12
+- `community.general` collection (`ansible-galaxy collection install community.general`)
+- SSH access to target hosts with sudo privileges
+- Python 3 on target hosts
+
+---
+
+## Execution via GitLab CI/CD & Sync
+
+```bash
+# 1. Run the generator
+./execute.sh
+
+# 2. Choose Option B (GitLab), provide:
+#    - GitLab API URL (e.g., https://gitlab.com/api/v4)
+#    - Private Access Token (api scope)
+#    - Project ID
+#    - Target branch (default: main)
+
+# 3. Files are pushed to the GitLab repository
+#    Repository structure:
+#    ├── site.yml
+#    ├── inventory.ini
+#    └── templates/
+#        ├── chrony.conf.j2
+#        └── resolv.conf.j2
+
+# 4. In GitLab CI/CD (.gitlab-ci.yml):
+#    stages:
+#      - provision
+#    provision:
+#      stage: provision
+#      image: python:3.11
+#      before_script:
+#        - pip install ansible
+#        - ansible-galaxy collection install community.general
+#      script:
+#        - ansible-playbook -i inventory.ini site.yml
+#      when: manual
+```
+
+### GitLab Runner Requirements
+- Runner with network access to target hosts
+- SSH key configured for target hosts
+- `become` password stored in CI/CD variables
+
+---
+
+## Post-Execution Verification Checklist
+
+Run these commands on each provisioned host:
+
+```bash
+# Timezone & NTP
+timedatectl
+chronyc sources -v
+chronyc tracking
+
+# SELinux (RHEL)
+sestatus
+
+# Firewall
+ufw status           # Ubuntu/Debian
+firewall-cmd --state # RHEL
+
+# DNS
+cat /etc/resolv.conf
+resolvectl status    # systemd-resolved
+
+# File limits
+ulimit -n
+cat /etc/security/limits.conf | grep nofile
+
+# Disabled services
+systemctl list-unit-files | grep -E '(postfix|bluetooth|cups|avahi-daemon|firewalld)' | grep -v 'disabled\|masked'
+```
+
+Expected results:
+- `timedatectl` → Time zone matches input, NTP synchronized: yes
+- `chronyc sources` → Custom NTP servers listed with `^*` or `^+` status
+- `sestatus` → SELinux status: disabled
+- `ufw status` / `firewall-cmd --state` → inactive / not running
+- `/etc/resolv.conf` → Contains primary/secondary DNS from input
+- `ulimit -n` → 65536
+- Target services → `masked` / `disabled`
+
+---
+
+## Repository Structure
+
+```
+03-os-provisioner/
+├── execute.sh              # Interactive generator (this file)
+├── README.md               # This documentation
+├── CHANGELOG.md            # Version history
+└── templates/              # Generated by execute.sh
+    ├── chrony.conf.j2      # NTP configuration template
+    └── resolv.conf.j2      # DNS configuration template
+```
+
+---
+
+## License
+
+MIT License – Part of the StratoShell ecosystem.
